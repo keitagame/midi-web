@@ -580,7 +580,7 @@ class SF2Synth {
     this.sf2 = sf2;
     this._bufferCache = new Map(); // sampleIndex -> AudioBuffer
     this.masterGain = audioCtx.createGain();
-    this.masterGain.gain.value = 0.9;
+    this.masterGain.gain.value = 0.3;
     this.masterGain.connect(audioCtx.destination);
 
     // 16 MIDI channels, each with program (bank/preset), pan, volume, pitch bend, etc.
@@ -640,19 +640,32 @@ _updateVoicePitch(v, ch) {
     if (v.source && v.source.playbackRate) {
       v.source.playbackRate.setValueAtTime(Math.max(0.001, playbackRate), this.ctx.currentTime);
     }
-  }
-_updateVoiceGain(v, ch) {
-    const velGain = Math.pow(v.velocity / 127, 2);
-    const softFactor = ch.softPedal ? 0.6 : 1.0;
-    const volRatio = ch.volume / 127;
-    const expRatio = ch.expression / 127;
-    const channelVolGain = (volRatio * volRatio) * (expRatio * expRatio) * softFactor;
-    const peakGain = v.attenGain * velGain * channelVolGain;
-    if (v.gainNode) {
-      v.gainNode.gain.setValueAtTime(Math.max(peakGain * v.sustainLevel, 0.0001), this.ctx.currentTime);
-    }
-  }
+  }_updateVoiceGain(v, ch) {
+  // v.velocity を参照（未定義時は100をデフォルトに）
+  const vel = (v && v.velocity !== undefined) ? v.velocity : 100;
+  const velGain = vel / 127;
 
+  const softFactor = ch.softPedal ? 0.6 : 1.0;
+  const volRatio =
+    (ch.volume !== undefined ? ch.volume : 100) / 127;
+
+const expRatio =
+    (ch.expression !== undefined ? ch.expression : 127) / 127;
+
+const channelVolGain =
+    volRatio *
+    expRatio *
+    softFactor;
+  const attenGain = v.attenGain !== undefined ? v.attenGain : 1.0;
+  const sustainLevel = v.sustainLevel !== undefined ? v.sustainLevel : 1.0;
+
+  const peakGain = attenGain * velGain * channelVolGain;
+  const finalGain = peakGain * sustainLevel;
+
+  if (v.gainNode && v.gainNode.gain && Number.isFinite(finalGain)) {
+    v.gainNode.gain.setValueAtTime(Math.max(finalGain, 0.0001), this.ctx.currentTime);
+  }
+}
 // 特定チャンネルの即時完全消音 (CC 120 All Sound Off 用)
 allSoundOff(channel) {
   for (const [key, voiceList] of this.activeVoices.entries()) {
@@ -757,11 +770,14 @@ const rootKey = (rootKeyGen !== undefined && rootKeyGen >= 0) ? rootKeyGen : sam
     const gainNode = this.ctx.createGain();
     const initialAtten = gens[GEN.initialAttenuation] || 0;
     const attenGain = centibelsToGain(initialAtten);
-   
-const velGain = Math.pow(velocity / 127, 2);
-    const volRatio = ch.volume / 127;
-    const expRatio = ch.expression / 127;
-    const channelVolGain = (volRatio * volRatio) * (expRatio * expRatio);
+   const velGain = velocity / 127;
+const volRatio = ch.volume / 127;
+const expRatio = ch.expression / 127;
+
+const channelVolGain =
+    volRatio *
+    expRatio;
+    
     // Pan
     // SF2Synth._startVoice 内の Pan 処理部分
 let panGen = gens[GEN.pan] !== undefined ? gens[GEN.pan] : 0; // -500..500
@@ -786,8 +802,8 @@ if (this.ctx.createStereoPanner) {
     const attack = timecentsToSeconds(gens[GEN.attackVolEnv]);
     const hold = timecentsToSeconds(gens[GEN.holdVolEnv]);
     const decay = timecentsToSeconds(gens[GEN.decayVolEnv]);
-    const sustainCb = gens[GEN.sustainVolEnv] !== undefined ? gens[GEN.sustainVolEnv] : 0; // 0=full,1000=silence(cB)
-    const sustainLevel = Math.max(0, Math.min(1, 1 - sustainCb / 1000));
+   const sustainCb = gens[GEN.sustainVolEnv] !== undefined ? gens[GEN.sustainVolEnv] : 0;
+const sustainLevel = centibelsToGain(sustainCb);
     const release = timecentsToSeconds(gens[GEN.releaseVolEnv]);
 
     const peakGain = attenGain * velGain * channelVolGain;
