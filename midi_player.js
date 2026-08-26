@@ -554,7 +554,7 @@ class SF2Synth {
     this.sf2 = sf2;
     this._bufferCache = new Map(); // sampleIndex -> AudioBuffer
     this.masterGain = audioCtx.createGain();
-    this.masterGain.gain.value = 0.2;
+    this.masterGain.gain.value = 0.8;
     this.masterGain.connect(audioCtx.destination);
 
     // 16 MIDI channels, each with program (bank/preset), pan, volume, pitch bend, etc.
@@ -730,18 +730,21 @@ allSoundOff(channel) {
     const channelVolGain = (ch.volume / 127) * (ch.expression / 127);
 
     // Pan
-    let panGen = gens[GEN.pan] !== undefined ? gens[GEN.pan] : 0; // -500..500 (0.1% units)
-    const channelPan = (ch.pan - 64) / 63; // -1..1
-    let panValue = Math.max(-1, Math.min(1, panGen / 500 + channelPan));
+    // SF2Synth._startVoice 内の Pan 処理部分
+let panGen = gens[GEN.pan] !== undefined ? gens[GEN.pan] : 0; // -500..500
+const channelPan = (ch.pan - 64) / 63; // -1..1
 
-    let panNode = null;
-    let outputNode = gainNode;
-    if (this.ctx.createStereoPanner) {
-      panNode = this.ctx.createStereoPanner();
-      panNode.pan.value = panValue;
-      gainNode.connect(panNode);
-      outputNode = panNode;
-    }
+// 修正: signedAmount 化された panGen を正しく -1.0 〜 +1.0 に変換
+let panValue = Math.max(-1, Math.min(1, (panGen / 500) + channelPan));
+
+let panNode = null;
+let outputNode = gainNode;
+if (this.ctx.createStereoPanner) {
+  panNode = this.ctx.createStereoPanner();
+  panNode.pan.value = panValue;
+  gainNode.connect(panNode);
+  outputNode = panNode;
+}
     outputNode.connect(this.masterGain);
     src.connect(gainNode);
 
