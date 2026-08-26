@@ -550,18 +550,82 @@ class SF2Synth {
 
     // 16 MIDI channels, each with program (bank/preset), pan, volume, pitch bend, etc.
     this.channels = [];
-    for (let i = 0; i < 16; i++) {
-      this.channels.push({
-        bank: 0, program: 0, presetIndex: -1,
-        volume: 100, expression: 127, pan: 64,
-        pitchBend: 0, pitchBendRangeSemitones: 2,
-        sustain: false, rpnMSB: 127, rpnLSB: 127,
-        drum: (i === 9) // channel 10 (index 9) defaults to percussion bank
-      });
-    }
+  for (let i = 0; i < 16; i++) {
+  this.channels.push({
+    bank: 0, program: 0, presetIndex: -1,
+    volume: 100, expression: 127, pan: 64,
+    pitchBend: 0, pitchBendRangeSemitones: 2,
+    fineTune: 0, coarseTune: 0,
+    sustain: false, sostenuto: false, softPedal: false,
+    cutoff: 64, resonance: 64, attackOffset: 0, releaseOffset: 0,
+    rpnMSB: 127, rpnLSB: 127,
+    drum: (i === 9)
+  });
+}
     this.activeVoices = new Map(); // key `${channel}_${note}` -> [voice,...]
   }
+setChannelPitchBend(channel, value) {
+  const ch = this.channels[channel];
+  ch.pitchBend = value;
+  this._updateChannelVoices(channel, (v) => this._updateVoicePitch(v, ch));
+}
 
+// リアルタイム・音量/パン更新
+setChannelVolume(channel, value) {
+  this.channels[channel].volume = value;
+  this._updateChannelVoices(channel, (v) => this._updateVoiceGain(v, this.channels[channel]));
+}
+setChannelExpression(channel, value) {
+  this.channels[channel].expression = value;
+  this._updateChannelVoices(channel, (v) => this._updateVoiceGain(v, this.channels[channel]));
+}
+setChannelPan(channel, value) {
+  this.channels[channel].pan = value;
+  if (this.ctx.createStereoPanner) {
+    this._updateChannelVoices(channel, (v) => {
+      if (v.panNode) v.panNode.pan.value = Math.max(-1, Math.min(1, (value - 64) / 63));
+    });
+  }
+}
+_updateChannelVoices(channel, callback) {
+  for (const [key, voiceList] of this.activeVoices.entries()) {
+    if (Number(key.split('_')[0]) === channel) {
+      for (const v of voiceList) callback(v);
+    }
+  }
+}
+
+_updateVoicePitch(v, ch) {
+  const bendSemis = (ch.pitchBend / 8192) * ch.pitchBendRangeSemitones;
+  const semitoneOffset = (v.note - v.rootKey) * (v.scaleTuning / 100) + v.coarseTune + ch.coarseTune + bendSemis;
+  const centsOffset = v.fineTune + v.pitchCorrection + ch.fineTune;
+  const playbackRate = Math.pow(2, semitoneOffset / 12) * Math.pow(2, centsOffset / 1200);
+  if (v.source && v.source.playbackRate) {
+    v.source.playbackRate.setValueAtTime(Math.max(0.001, playbackRate), this.ctx.currentTime);
+  }
+}
+
+_updateVoiceGain(v, ch) {
+  const velGain = v.velocity / 127;
+  const softFactor = ch.softPedal ? 0.6 : 1.0;
+  const channelVolGain = (ch.volume / 127) * (ch.expression / 127) * softFactor;
+  const peakGain = v.attenGain * velGain * channelVolGain;
+  if (v.gainNode) {
+    v.gainNode.gain.setValueAtTime(Math.max(peakGain * v.sustainLevel, 0.0001), this.ctx.currentTime);
+  }
+}
+
+// 特定チャンネルの即時完全消音 (CC 120 All Sound Off 用)
+allSoundOff(channel) {
+  for (const [key, voiceList] of this.activeVoices.entries()) {
+    if (Number(key.split('_')[0]) === channel) {
+      for (const v of voiceList) {
+        try { v.source.stop(); } catch (e) {}
+      }
+      this.activeVoices.delete(key);
+    }
+  }
+}
   setProgram(channel, bank, program) {
     const ch = this.channels[channel];
     ch.bank = bank;
@@ -951,34 +1015,104 @@ class MidiSequencer {
   }
 
   _dispatchEvent(ev, when) {
-    const muted = this.mutedTracks.has(ev.trackIdx);
+  const muted = this.mutedTracks.has(ev.trackIdx);
 
-    switch (ev.type) {
-      case 'noteOn':
-        if (!muted) {
-          this.synth.noteOn(ev.channel, ev.note, ev.velocity, when);
-          if (this.onNoteEvent) this.onNoteEvent(ev.note, ev.channel, true, when - this.ctx.currentTime);
-        }
-        break;
-      case 'noteOff':
-        this.synth.noteOff(ev.channel, ev.note, when);
-        if (this.onNoteEvent) this.onNoteEvent(ev.note, ev.channel, false, when - this.ctx.currentTime);
-        break;
-      case 'programChange': {
-        const ch = this.synth.channels[ev.channel];
-        this.synth.setProgram(ev.channel, ch.bank, ev.program);
-        break;
-      }
-      case 'controlChange':
-        this._handleCC(ev, when);
-        break;
-      case 'pitchBend':
-        this.synth.setChannelPitchBend(ev.channel, ev.value);
-        break;
-      default:
-        break;
+  if (ev.sysex && !muted) {
+    // GM / GS / XG Reset の判定
+    if (ev.data && ev.data.length >= 5 && ev.data[1] === 0x7E && ev.data[3] === 0x09) {
+      this._resetAllControllers();
     }
+    return;
   }
+
+  switch (ev.type) {
+    case 'noteOn':
+      if (!muted) {
+        this.synth.noteOn(ev.channel, ev.note, ev.velocity, when);
+        if (this.onNoteEvent) this.onNoteEvent(ev.note, ev.channel, true, when - this.ctx.currentTime);
+      }
+      break;
+    case 'noteOff':
+      this.synth.noteOff(ev.channel, ev.note, when);
+      if (this.onNoteEvent) this.onNoteEvent(ev.note, ev.channel, false, when - this.ctx.currentTime);
+      break;
+    case 'programChange':
+      const ch = this.synth.channels[ev.channel];
+      this.synth.setProgram(ev.channel, ch.bank, ev.program);
+      break;
+    case 'controlChange':
+      this._handleCC(ev, when);
+      break;
+    case 'pitchBend':
+      this.synth.setChannelPitchBend(ev.channel, ev.value);
+      break;
+  }
+}
+
+_handleCC(ev, when) {
+  const ch = this.synth.channels[ev.channel];
+  const val = ev.value;
+
+  switch (ev.controller) {
+    case 0:  // Bank Select MSB
+      ch.bank = (ch.bank & 0x7F) | (val << 7);
+      break;
+    case 32: // Bank Select LSB
+      ch.bank = (ch.bank & 0x3F80) | val;
+      break;
+    case 6:  // Data Entry MSB (RPN処理)
+      if (ch.rpnMSB === 0 && ch.rpnLSB === 0) ch.pitchBendRangeSemitones = val; // Pitch Bend Sensitivity
+      else if (ch.rpnMSB === 0 && ch.rpnLSB === 1) ch.fineTune = (val - 64) * (100 / 64); // Fine Tune (cents)
+      else if (ch.rpnMSB === 0 && ch.rpnLSB === 2) ch.coarseTune = val - 64; // Coarse Tune (semitones)
+      break;
+    case 7:  this.synth.setChannelVolume(ev.channel, val); break;
+    case 10: this.synth.setChannelPan(ev.channel, val); break;
+    case 11: this.synth.setChannelExpression(ev.channel, val); break;
+    case 64: // Sustain Pedal
+      this.synth.setChannelSustain(ev.channel, val >= 64);
+      if (val < 64) this.synth.channelSustainOff(ev.channel, when);
+      break;
+    case 66: // Sostenuto Pedal
+      ch.sostenuto = val >= 64;
+      break;
+    case 67: // Soft Pedal
+      ch.softPedal = val >= 64;
+      this.synth.setChannelVolume(ev.channel, ch.volume);
+      break;
+    case 72: ch.releaseOffset = (val - 64) / 64; break; // Release Time
+    case 73: ch.attackOffset = (val - 64) / 64; break;  // Attack Time
+    case 100: ch.rpnLSB = val; break;
+    case 101: ch.rpnMSB = val; break;
+    case 120: // All Sound Off
+      this.synth.allSoundOff(ev.channel);
+      break;
+    case 121: // Reset All Controllers
+      this._resetChannelControllers(ev.channel);
+      break;
+    case 123: // All Notes Off
+      this.synth.allNotesOff(when);
+      break;
+  }
+}
+
+_resetChannelControllers(channel) {
+  const ch = this.synth.channels[channel];
+  ch.pitchBend = 0;
+  ch.volume = 100;
+  ch.expression = 127;
+  ch.pan = 64;
+  ch.sustain = false;
+  ch.sostenuto = false;
+  ch.softPedal = false;
+  ch.rpnMSB = 127;
+  ch.rpnLSB = 127;
+}
+
+_resetAllControllers() {
+  for (let i = 0; i < 16; i++) {
+    this._resetChannelControllers(i);
+  }
+}
 
   _handleCC(ev, when) {
     const ch = this.synth.channels[ev.channel];
