@@ -489,36 +489,35 @@ class SF2Parser {
 
     const results = [];
     for (const pz of matchingPresetZones) {
-      const izones = this._instrumentZones[pz.instrumentId] || [];
-      let instGlobalGens = {};
-      for (const iz of izones) {
-        if (iz.sampleId === null) { instGlobalGens = iz.gens; continue; }
-        if (!this._zoneMatches(iz.gens, note, velocity)) continue;
-        const sample = this.samples[iz.sampleId];
-        if (!sample) continue;
+    const izones = this._instrumentZones[pz.instrumentId] || [];
+    let instGlobalGens = {};
+    for (const iz of izones) {
+      if (iz.sampleId === null) { instGlobalGens = iz.gens; continue; }
+      if (!this._zoneMatches(iz.gens, note, velocity)) continue;
+      const sample = this.samples[iz.sampleId];
+      if (!sample) continue;
 
-        // Merge: instrument global -> instrument local -> (preset global + preset local as relative offsets)
-        const merged = {};
-        for (const k in instGlobalGens) merged[k] = instGlobalGens[k].amount;
-        for (const k in iz.gens) merged[k] = iz.gens[k].amount;
+      // 修正: .amount ではなく .signedAmount を参照する
+      const merged = {};
+      for (const k in instGlobalGens) merged[k] = instGlobalGens[k].signedAmount;
+      for (const k in iz.gens) merged[k] = iz.gens[k].signedAmount;
 
-        // Apply preset-level as additive offsets (simplified; good enough for playback)
-        const applyRelative = (genMap) => {
-  for (const k in genMap) {
-    const oper = Number(k);
-    const g = genMap[k];
-    if (oper === GEN.keyRange || oper === GEN.velRange) continue;
-    const amt = g.signedAmount; // amount ではなく signedAmount を使用
-    merged[k] = (merged[k] !== undefined ? merged[k] : 0) + amt;
-  }
-};
-        applyRelative(presetGlobalGens);
-        applyRelative(pz.gens);
+      const applyRelative = (genMap) => {
+        for (const k in genMap) {
+          const oper = Number(k);
+          const g = genMap[k];
+          if (oper === GEN.keyRange || oper === GEN.velRange) continue;
+          const amt = g.signedAmount; // signedAmount を使用
+          merged[k] = (merged[k] !== undefined ? merged[k] : 0) + amt;
+        }
+      };
+      applyRelative(presetGlobalGens);
+      applyRelative(pz.gens);
 
-        results.push({ sample, gens: merged, rawInstGens: { ...instGlobalGens, ...iz.gens } });
-      }
+      results.push({ sample, gens: merged, rawInstGens: { ...instGlobalGens, ...iz.gens } });
     }
-    return results;
+  }
+  return results;
   }
 
   _zoneMatches(gens, note, velocity) {
