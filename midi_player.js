@@ -114,6 +114,7 @@ class MidiFile {
 
         if (statusByte === 0xFF) {
           // Meta event
+          runningStatus = null; // ★追加: メタイベント後はランニングステータス破棄
           const metaType = r.u8();
           const len = r.vlq();
           const data = r.bytes(len);
@@ -130,6 +131,7 @@ class MidiFile {
           events.push(ev);
         } else if (statusByte === 0xF0 || statusByte === 0xF7) {
           // SysEx event
+          runningStatus = null;
           const len = r.vlq();
           const data = r.bytes(len);
           events.push({ tick, deltaTime: delta, sysex: true, data });
@@ -442,19 +444,27 @@ class SF2Parser {
     });
   }
 
-  // Find a preset by bank/program number
-  findPreset(bank, program) {
-    for (let i = 0; i < this.presets.length; i++) {
-      const p = this.presets[i];
-      if (p.bank === bank && p.preset === program) return i;
-    }
-    // fallback: try bank 0
-    for (let i = 0; i < this.presets.length; i++) {
-      const p = this.presets[i];
-      if (p.preset === program) return i;
-    }
-    return this.presets.length ? 0 : -1;
+ findPreset(bank, program) {
+  // 1. 完全一致 (Bank, Program)
+  for (let i = 0; i < this.presets.length; i++) {
+    if (this.presets[i].bank === bank && this.presets[i].preset === program) return i;
   }
+  // 2. ドラム (Bank 128系) の互換検索
+  if (bank >= 128) {
+    for (let i = 0; i < this.presets.length; i++) {
+      if (this.presets[i].bank === 128 && this.presets[i].preset === program) return i;
+    }
+  }
+  // 3. Bank 0 で同プログラムを検索
+  for (let i = 0; i < this.presets.length; i++) {
+    if (this.presets[i].bank === 0 && this.presets[i].preset === program) return i;
+  }
+  // 4. それでも無ければ Program 0（ピアノ）に倒す
+  for (let i = 0; i < this.presets.length; i++) {
+    if (this.presets[i].preset === 0) return i;
+  }
+  return this.presets.length ? 0 : -1;
+}
 
   /**
    * Get all sample zones matching a given MIDI note & velocity for a preset.
@@ -494,14 +504,14 @@ class SF2Parser {
 
         // Apply preset-level as additive offsets (simplified; good enough for playback)
         const applyRelative = (genMap) => {
-          for (const k in genMap) {
-            const oper = Number(k);
-            const g = genMap[k];
-            if (oper === GEN.keyRange || oper === GEN.velRange) continue; // ranges not additive
-            const amt = g.signedAmount;
-            merged[k] = (merged[k] !== undefined ? merged[k] : 0) + amt;
-          }
-        };
+  for (const k in genMap) {
+    const oper = Number(k);
+    const g = genMap[k];
+    if (oper === GEN.keyRange || oper === GEN.velRange) continue;
+    const amt = g.signedAmount; // amount ではなく signedAmount を使用
+    merged[k] = (merged[k] !== undefined ? merged[k] : 0) + amt;
+  }
+};
         applyRelative(presetGlobalGens);
         applyRelative(pz.gens);
 
@@ -561,7 +571,9 @@ class SF2Synth {
     rpnMSB: 127, rpnLSB: 127,
     drum: (i === 9)
   });
-}
+  this.setProgram(i, i === 9 ? 128 : 0, 0);
+}// SF2Synth コンストラクタ内
+
     this.activeVoices = new Map(); // key `${channel}_${note}` -> [voice,...]
   }
 setChannelPitchBend(channel, value) {
@@ -756,7 +768,12 @@ allSoundOff(channel) {
     g.linearRampToValueAtTime(sustainGain, decayEnd);
 
     src.start(time);
-
+return {
+  source: src, gainNode, panNode, release: Math.max(release, 0.01),
+  sustainGain, note, channel, started: true, buffer,
+  // 以下のピッチ計算用プロパティを保持させる
+  rootKey, coarseTune, fineTune, scaleTuning, pitchCorrection, attenGain, velocity
+};
     return {
       source: src, gainNode, panNode, release: Math.max(release, 0.01),
       sustainGain, note, channel, started: true, buffer
