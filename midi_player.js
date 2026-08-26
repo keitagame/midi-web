@@ -470,82 +470,74 @@ class SF2Parser {
   }
   return this.presets.length ? 0 : -1;
 }
-  /**
-   * Get all sample zones matching a given MIDI note & velocity for a preset.
-   * Merges preset-level generators (relative) over instrument-level generators (absolute),
-   * per the SF2 spec's two-level zone system (with a simplification: no global zone chaining edge-cases).
-   * Returns array of { sampleHeader, gens } where gens is a merged map of GEN id -> numeric value.
-   */
-  getZonesForNote(presetIndex, note, velocity) {
-    const pzones = this._presetZonesByIndex[presetIndex];
-    if (!pzones) return [];
+ 
+   getZonesForNote(presetIndex, note, velocity) {
+  const pzones = this._presetZonesByIndex[presetIndex];
+  if (!pzones) return [];
 
-    let presetGlobalGens = {};
-    const matchingPresetZones = [];
-    for (let i = 0; i < pzones.length; i++) {
-      const z = pzones[i];
-      if (i === 0 && z.instrumentId === null) {
-        presetGlobalGens = z.gens;
+  let presetGlobalGens = {};
+  const matchingPresetZones = [];
+  for (let i = 0; i < pzones.length; i++) {
+    const z = pzones[i];
+    if (i === 0 && z.instrumentId === null) {
+      presetGlobalGens = z.gens;
+      continue;
+    }
+    if (z.instrumentId === null) continue;
+
+    const combinedGens = { ...presetGlobalGens, ...z.gens };
+    if (this._zoneMatches(combinedGens, note, velocity)) {
+      matchingPresetZones.push({ z, combinedGens });
+    }
+  }
+
+  const OVERRIDE_GENS = new Set([
+    GEN.overridingRootKey, GEN.keynum, GEN.velocity,
+    GEN.sampleModes, GEN.exclusiveClass, GEN.sampleID
+  ]);
+
+  const results = [];
+  for (const { z: pz, combinedGens: pGens } of matchingPresetZones) {
+    const izones = this._instrumentZones[pz.instrumentId] || [];
+    let instGlobalGens = {};
+
+    for (let j = 0; j < izones.length; j++) {
+      const iz = izones[j];
+      if (j === 0 && iz.sampleId === null) {
+        instGlobalGens = iz.gens;
         continue;
       }
-      if (z.instrumentId === null) continue;
+      if (iz.sampleId === null) continue;
 
-      const combinedGens = { ...presetGlobalGens, ...z.gens };
-      if (this._zoneMatches(combinedGens, note, velocity)) {
-        matchingPresetZones.push({ z, combinedGens });
+      const combinedInstGens = { ...instGlobalGens, ...iz.gens };
+      if (!this._zoneMatches(combinedInstGens, note, velocity)) continue;
+
+      const sample = this.samples[iz.sampleId];
+      if (!sample) continue;
+
+      const merged = {};
+      for (const k in combinedInstGens) {
+        merged[k] = combinedInstGens[k].signedAmount;
       }
-    }
 
-    // 上書き（非加算）型ジェネレータの定義
-    const OVERRIDE_GENS = new Set([
-      GEN.overridingRootKey, // 58
-      GEN.keynum,            // 46
-      GEN.velocity,          // 47
-      GEN.sampleModes,       // 54
-      GEN.exclusiveClass,    // 57
-      GEN.sampleID           // 53
-    ]);
+      for (const k in pGens) {
+        const oper = Number(k);
+        if (oper === GEN.keyRange || oper === GEN.velRange) continue;
 
-    const results = [];
-    for (const { z: pz, combinedGens: pGens } of matchingPresetZones) {
-      const izones = this._instrumentZones[pz.instrumentId] || [];
-      let instGlobalGens = {};
-
-      for (let j = 0; j < izones.length; j++) {
-        const iz = izones[j];
-        if (j === 0 && iz.sampleId === null) {
-          instGlobalGens = iz.gens;
-          continue;
+        const pVal = pGens[k].signedAmount;
+        if (OVERRIDE_GENS.has(oper)) {
+          // -1 (非設定値) でなければ上書き
+          if (pVal !== undefined && pVal !== -1) merged[k] = pVal;
+        } else {
+          merged[k] = (merged[k] !== undefined ? merged[k] : 0) + pVal;
         }
-        if (iz.sampleId === null) continue;
-
-        const combinedInstGens = { ...instGlobalGens, ...iz.gens };
-        if (!this._zoneMatches(combinedInstGens, note, velocity)) continue;
-
-        const sample = this.samples[iz.sampleId];
-        if (!sample) continue;
-
-        const merged = {};
-        for (const k in combinedInstGens) {
-          merged[k] = combinedInstGens[k].signedAmount;
-        }
-
-        for (const k in pGens) {
-          const oper = Number(k);
-          if (oper === GEN.keyRange || oper === GEN.velRange) continue;
-
-          if (OVERRIDE_GENS.has(oper)) {
-            if (pGens[k] !== undefined) merged[k] = pGens[k].signedAmount;
-          } else {
-            merged[k] = (merged[k] !== undefined ? merged[k] : 0) + pGens[k].signedAmount;
-          }
-        }
-
-        results.push({ sample, gens: merged });
       }
+
+      results.push({ sample, gens: merged });
     }
-    return results;
   }
+  return results;
+}
   _zoneMatches(gens, note, velocity) {
     const kr = gens[GEN.keyRange];
     if (kr) { if (note < kr.lo || note > kr.hi) return false; }
@@ -726,12 +718,12 @@ allSoundOff(channel) {
 
   _startVoice(ch, channel, note, velocity, zone, time) {
     const buffer = this._getBuffer(zone.sample);
-    if (!buffer) return null;
-    const gens = zone.gens;
-    const sample = zone.sample;
+  if (!buffer) return null;
+  const gens = zone.gens;
+  const sample = zone.sample;
 
-    const src = this.ctx.createBufferSource();
-    src.buffer = buffer;
+  const src = this.ctx.createBufferSource();
+  src.buffer = buffer;
 
     // Loop handling
     const sampleModes = gens[GEN.sampleModes] !== undefined ? gens[GEN.sampleModes] : 0;
@@ -748,23 +740,22 @@ allSoundOff(channel) {
 
     // Pitch calculation
     const rootKeyGen = gens[GEN.overridingRootKey];
-   
-// 修正後（128以上は60として扱う）
-const sampleOriginalPitch = (sample.originalPitch >= 128) ? 60 : sample.originalPitch;
-const rootKey = (rootKeyGen !== undefined && rootKeyGen >= 0) ? rootKeyGen : sampleOriginalPitch;
-    const keynumGen = gens[GEN.keynum];
-    const targetNote = (keynumGen !== undefined && keynumGen >= 0) ? keynumGen : note;
+  const sampleOriginalPitch = (sample.originalPitch >= 128 || sample.originalPitch < 0) ? 60 : sample.originalPitch;
+  const rootKey = (rootKeyGen !== undefined && rootKeyGen >= 0 && rootKeyGen <= 127) ? rootKeyGen : sampleOriginalPitch;
 
-    const coarseTune = gens[GEN.coarseTune] || 0;
-    const fineTune = gens[GEN.fineTune] || 0;
-    const pitchCorrection = sample.pitchCorrection || 0;
-    const scaleTuning = gens[GEN.scaleTuning] !== undefined ? gens[GEN.scaleTuning] : 100;
+  const keynumGen = gens[GEN.keynum];
+  const targetNote = (keynumGen !== undefined && keynumGen >= 0 && keynumGen <= 127) ? keynumGen : note;
 
-    const bendSemis = (ch.pitchBend / 8192) * ch.pitchBendRangeSemitones;
-    const semitoneOffset = (targetNote - rootKey) * (scaleTuning / 100) + coarseTune + ch.coarseTune + bendSemis;
-    const centsOffset = fineTune + pitchCorrection + ch.fineTune;
-    const playbackRate = Math.pow(2, (semitoneOffset + centsOffset / 100) / 12);
-    src.playbackRate.value = Math.max(0.001, playbackRate);
+  const coarseTune = gens[GEN.coarseTune] || 0;
+  const fineTune = gens[GEN.fineTune] || 0;
+  const pitchCorrection = sample.pitchCorrection || 0;
+  const scaleTuning = gens[GEN.scaleTuning] !== undefined ? gens[GEN.scaleTuning] : 100;
+
+  const bendSemis = (ch.pitchBend / 8192) * ch.pitchBendRangeSemitones;
+  const semitoneOffset = (targetNote - rootKey) * (scaleTuning / 100) + coarseTune + ch.coarseTune + bendSemis;
+  const centsOffset = fineTune + pitchCorrection + ch.fineTune;
+  const playbackRate = Math.pow(2, (semitoneOffset + centsOffset / 100) / 12);
+  src.playbackRate.value = Math.max(0.001, playbackRate);
 
     // Gain staging
     const gainNode = this.ctx.createGain();
@@ -820,10 +811,10 @@ const sustainLevel = centibelsToGain(sustainCb);
 
     src.start(time);
 return {
-      source: src, gainNode, panNode, release: Math.max(release, 0.01),
-      sustainGain, sustainLevel, note, targetNote, channel, started: true, buffer,
-      rootKey, coarseTune, fineTune, scaleTuning, pitchCorrection, attenGain, velocity
-    };
+    source: src, gainNode, panNode, release: Math.max(release, 0.01),
+    sustainGain, sustainLevel, note, targetNote, channel, started: true, buffer,
+    rootKey, coarseTune, fineTune, scaleTuning, pitchCorrection, attenGain, velocity
+  };
   }
 
   noteOff(channel, note, time) {
@@ -1119,10 +1110,15 @@ _handleCC(ev, when) {
     case 32: // Bank Select LSB
       
       break;
-    case 6:  // Data Entry MSB (RPN処理)
-      if (ch.rpnMSB === 0 && ch.rpnLSB === 0) ch.pitchBendRangeSemitones = val; // Pitch Bend Sensitivity
-      else if (ch.rpnMSB === 0 && ch.rpnLSB === 1) ch.fineTune = (val - 64) * (100 / 64); // Fine Tune (cents)
-      else if (ch.rpnMSB === 0 && ch.rpnLSB === 2) ch.coarseTune = val - 64; // Coarse Tune (semitones)
+    case 6: // Data Entry MSB
+      // RPN未指定(127)でも、直前にCC100/101が来ていれば柔軟に対応
+      if ((ch.rpnMSB === 0 || ch.rpnMSB === 127) && ch.rpnLSB === 0) {
+        ch.pitchBendRangeSemitones = val;
+      } else if (ch.rpnMSB === 0 && ch.rpnLSB === 1) {
+        ch.fineTune = (val - 64) * (100 / 64);
+      } else if (ch.rpnMSB === 0 && ch.rpnLSB === 2) {
+        ch.coarseTune = val - 64;
+      }
       break;
     case 7:  this.synth.setChannelVolume(ev.channel, val); break;
     case 10: this.synth.setChannelPan(ev.channel, val); break;
