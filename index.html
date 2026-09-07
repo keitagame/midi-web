@@ -309,9 +309,10 @@ class SF2Parser {
       const len = r.u32le();
       const chunkEnd = r.pos + len;
       if (id === 'smpl') {
-        // 16-bit signed PCM, little-endian, mono, concatenated samples
         const bytes = r.bytes(len);
-        this.sampleData = new Int16Array(bytes.buffer, bytes.byteOffset, len / 2);
+        // byteOffsetのアライメントエラーを防ぐためsliceで新しいBufferを渡す
+        const alignedBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + len);
+        this.sampleData = new Int16Array(alignedBuffer);
       } else {
         r.pos = chunkEnd;
       }
@@ -462,31 +463,29 @@ class SF2Parser {
   }
 
  findPreset(bank, program) {
-  // ドラムバンク（128）の処理
-  if (bank === 128) {
-    for (let i = 0; i < this.presets.length; i++) {
-      if (this.presets[i].bank === 128 && this.presets[i].preset === program) return i;
-    }
-    for (let i = 0; i < this.presets.length; i++) {
-      if (this.presets[i].bank === 128 && this.presets[i].preset === 0) return i;
-    }
-  }
+    // ターミネータ(EOP)を除外するため length - 1 まで検索
+    const presetCount = Math.max(0, this.presets.length - 1);
 
-  // 通常楽器の処理
-  // 1. 指定バンク・指定プログラムの一致
-  for (let i = 0; i < this.presets.length; i++) {
-    if (this.presets[i].bank === bank && this.presets[i].preset === program) return i;
+    if (bank === 128) {
+      for (let i = 0; i < presetCount; i++) {
+        if (this.presets[i].bank === 128 && this.presets[i].preset === program) return i;
+      }
+      for (let i = 0; i < presetCount; i++) {
+        if (this.presets[i].bank === 128 && this.presets[i].preset === 0) return i;
+      }
+    }
+
+    for (let i = 0; i < presetCount; i++) {
+      if (this.presets[i].bank === bank && this.presets[i].preset === program) return i;
+    }
+    for (let i = 0; i < presetCount; i++) {
+      if (this.presets[i].bank === 0 && this.presets[i].preset === program) return i;
+    }
+    for (let i = 0; i < presetCount; i++) {
+      if (this.presets[i].preset === 0) return i;
+    }
+    return presetCount ? 0 : -1;
   }
-  // 2. Bank 0（標準バンク）の指定プログラム（ピアノ化を防ぐ重要処理）
-  for (let i = 0; i < this.presets.length; i++) {
-    if (this.presets[i].bank === 0 && this.presets[i].preset === program) return i;
-  }
-  // 3. どうしても音色が存在しない場合のみ Program 0 (ピアノ) へ
-  for (let i = 0; i < this.presets.length; i++) {
-    if (this.presets[i].preset === 0) return i;
-  }
-  return this.presets.length ? 0 : -1;
-}
  
    getZonesForNote(presetIndex, note, velocity) {
   const pzones = this._presetZonesByIndex[presetIndex];
@@ -763,7 +762,7 @@ allSoundOff(channel) {
     }
 
     // Pitch calculation
-    const rootKeyGen = gens[GEN.overridingRootKey];
+  const rootKeyGen = gens[GEN.overridingRootKey];
   const sampleOriginalPitch = (sample.originalPitch >= 128 || sample.originalPitch < 0) ? 60 : sample.originalPitch;
   const rootKey = (rootKeyGen !== undefined && rootKeyGen >= 0 && rootKeyGen <= 127) ? rootKeyGen : sampleOriginalPitch;
 
@@ -777,8 +776,14 @@ allSoundOff(channel) {
 
   const bendSemis = (ch.pitchBend / 8192) * ch.pitchBendRangeSemitones;
   const semitoneOffset = (targetNote - rootKey) * (scaleTuning / 100) + coarseTune + ch.coarseTune + bendSemis;
-  const centsOffset = fineTune + pitchCorrection + ch.fineTune;
-  const playbackRate = Math.pow(2, (semitoneOffset + centsOffset / 100) / 12);
+  
+  // pitchCorrection は正の値でピッチを下げる仕様のため減算 (- pitchCorrection) に変更
+  const centsOffset = fineTune - pitchCorrection + ch.fineTune;
+  
+  // AudioBufferとSampleのレート比率補正を追加
+  const rateRatio = (sample.sampleRate && buffer.sampleRate) ? (sample.sampleRate / buffer.sampleRate) : 1.0;
+  const playbackRate = Math.pow(2, (semitoneOffset + centsOffset / 100) / 12) * rateRatio;
+  
   src.playbackRate.value = Math.max(0.001, playbackRate);
 
   if (window.__PITCH_DEBUG__) {
