@@ -581,6 +581,21 @@ function centibelsToGain(cb) {
   if (cb === undefined) return 1;
   return Math.pow(10, -cb / 200);
 }
+// initialAttenuation(GEN 48)専用の変換。
+// 多くのSF2ファイル(特に古いツールで作られたもの)は仕様上の1/10dB単位ではなく
+// 実質2倍のセンチベル値で書き出されているため、そのまま10^(-cb/200)を適用すると
+// プリセットによって減衰量が大きく食い違い、トラックごとの音量バランスが崩れる。
+// ここでは異常に大きい値(実測でよくある~1440cb=144dBなど)を検出し、
+// 半分の値として解釈することで一般的なシンセ実装(FluidSynth等)に近い挙動に補正する。
+function initialAttenuationToGain(cb) {
+  if (cb === undefined || cb <= 0) return 1;
+  // 通常の適正範囲はおよそ0〜200cb(0〜20dB)程度。
+  // それを大きく超える値は「2倍表記」の可能性が高いので半分にする。
+  const adjusted = cb > 200 ? cb / 2 : cb;
+  // さらに異常値による無音化を防ぐため上限をクランプ(最大約24dB減衰)
+  const clamped = Math.min(adjusted, 240);
+  return Math.pow(10, -clamped / 200);
+}
 // MIDI velocity(0-127) -> linear amplitude gain.
 // 単純な線形(vel/127)は強弱の効きが不自然になるため、
 // 一般的なシンセ実装に倣いパワーカーブ(二乗)で変換する。
@@ -793,7 +808,7 @@ allSoundOff(channel) {
     // Gain staging
     const gainNode = this.ctx.createGain();
     const initialAtten = gens[GEN.initialAttenuation] || 0;
-    const attenGain = centibelsToGain(initialAtten);
+    const attenGain = initialAttenuationToGain(initialAtten);
     const velGain = velocityToGain(velocity);
     const softFactor = ch.softPedal ? 0.6 : 1.0;
     const volRatio = (ch.volume !== undefined ? ch.volume : 100) / 127;
